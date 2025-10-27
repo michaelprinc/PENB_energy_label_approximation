@@ -11,11 +11,14 @@ def clean_weather_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Vyčistí a zkontroluje data o počasí.
     
+    KRITICKÉ: NESMÍ interpolovat mezi rozd6lenými měsíci!
+    Pouze zpracovává skutečná data a krátké mezery (max 3 hodiny).
+    
     Args:
         df: DataFrame s počasím (timestamp, temp_out_c, ...)
     
     Returns:
-        Vyčištěný DataFrame
+        Vyčištěný DataFrame - POUZE s daty která skutečně existují + krátké mezery
     """
     df = df.copy()
     
@@ -29,27 +32,86 @@ def clean_weather_data(df: pd.DataFrame) -> pd.DataFrame:
     # Odstraň duplikáty
     df = df.drop_duplicates(subset=['timestamp'], keep='first')
     
-    # Interpoluj chybějící hodnoty (pokud jsou krátké mezery)
+    # Set index pro časové operace
     df = df.set_index('timestamp')
-    df = df.resample('1H').mean()  # Resample na hodiny
     
-    # Interpoluj krátké mezery (max 3 hodiny)
-    df = df.interpolate(method='linear', limit=3)
+    # KRITICKÁ ZMĚNA: Resample POUZE tam kde data existují
+    # NESMÍ interpolovat dlouhé mezery (>3h)
     
-    # Označ dlouhé mezery
-    missing_before = df['temp_out_c'].isna().sum()
-    if missing_before > 0:
-        print(f"⚠ Chybí {missing_before} hodinových záznamů (z {len(df)})")
+    # Vytvoř kompletní hodinový index POUZE v rozsahu kde máme data
+    min_time = df.index.min()
+    max_time = df.index.max()
     
-    # Doplň zbylé chybějící hodnoty forward/backward fill
-    df = df.fillna(method='ffill', limit=6)
-    df = df.fillna(method='bfill', limit=6)
+    # Kompletní hodinový rozsah
+    full_hourly_range = pd.date_range(start=min_time, end=max_time, freq='h')
     
+    # Reindex - toto vytvoří NaN pro chybějící hodiny
+    df = df.reindex(full_hourly_range)
+    
+    # KLÍČOVÉ: Detekuj dlouhé mezery PŘED interpolací
+    # Najdi všechny NaN segmenty
+    is_missing = df['temp_out_c'].isna()
+    
+    # Označ změny (začátky a konce mezer)
+    missing_changes = is_missing != is_missing.shift()
+    missing_groups = missing_changes.cumsum()
+    
+    # Pro každou skupinu NaN zjisti délku
+    for group_id in missing_groups[is_missing].unique():
+        group_mask = (missing_groups == group_id) & is_missing
+        gap_length = group_mask.sum()
+        
+        # Pokud je mezera > 3 hodiny, označ ji jako "dlouhá mezera" (neinterpolovat)
+        if gap_length > 3:
+            df.loc[group_mask, 'long_gap'] = True
+    
+    # KLÍČOVÉ: Interpoluj POUZE krátké mezery (max 3 hodiny)
+    # limit_area='inside' zajistí že neinterpoluje na krajích datasetu
+    if 'long_gap' not in df.columns:
+        df['long_gap'] = False
+    df['long_gap'] = df['long_gap'].fillna(False)
+    
+    # Interpoluj pouze tam, kde NENÍ dlouhá mezera
+    mask_interpolate = is_missing & ~df['long_gap']
+    
+    if mask_interpolate.any():
+        # Interpoluj pouze označená místa
+        df_interpolated = df.interpolate(method='linear', limit=3, limit_area='inside')
+        # Aplikuj interpolaci pouze na krátké mezery
+        for col in ['temp_out_c', 'humidity_pct', 'wind_mps', 'ghi_wm2']:
+            if col in df.columns:
+                df.loc[mask_interpolate, col] = df_interpolated.loc[mask_interpolate, col]
+    
+    # Označení mezer
+    missing_count = df['temp_out_c'].isna().sum()
+    total_count = len(df)
+    
+    if missing_count > 0:
+        missing_pct = missing_count / total_count * 100
+        print(f"⚠ Chybí {missing_count} hodinových záznamů z {total_count} ({missing_pct:.1f}%)")
+        print(f"  Tyto mezery NEBYLY interpolovány (>3h gap)")
+    
+    # Reset index
     df = df.reset_index()
+    df.rename(columns={'index': 'timestamp'}, inplace=True)
+    
+    # DŮLEŽITÉ: Odstraň řádky kde je stále NaN (dlouhé mezery)
+    rows_before = len(df)
+    df = df.dropna(subset=['temp_out_c'])
+    rows_after = len(df)
+    
+    # Odstraň pomocný sloupec
+    if 'long_gap' in df.columns:
+        df = df.drop(columns=['long_gap'])
+    
+    if rows_before != rows_after:
+        print(f"✓ Odstraněno {rows_before - rows_after} hodin s dlouhými mezerami")
+        print(f"  Zbývá {rows_after} hodin se skutečnými/interpolovanými daty")
     
     # Kontrola rozsahu hodnot
-    if df['temp_out_c'].min() < -40 or df['temp_out_c'].max() > 50:
-        print("⚠ Podezřelé venkovní teploty mimo rozsah -40°C až 50°C")
+    if len(df) > 0:
+        if df['temp_out_c'].min() < -40 or df['temp_out_c'].max() > 50:
+            print("⚠ Podezřelé venkovní teploty mimo rozsah -40°C až 50°C")
     
     return df
 

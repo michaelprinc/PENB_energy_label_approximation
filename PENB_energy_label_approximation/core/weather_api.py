@@ -91,13 +91,16 @@ def fetch_hourly_weather(
     today = date.today()
     
     # Kontrola, zda jsou data v dosahu free tier (7 dní zpětně)
+    # POZNÁMKA: WeatherAPI.com free tier podporuje POUZE posledních 7 dní
+    # Pro starší data je potřeba placený tarif nebo se použijí syntetická data
     days_back = (today - start_date).days
     use_free_tier = days_back <= 7
     
     if use_free_tier:
         print(f"✓ Data jsou do 7 dní zpětně - použiji free tier forecast API")
     else:
-        print(f"⚠ Data jsou {days_back} dní zpětně - vyžadují history API (placený)")
+        print(f"⚠ Data jsou {days_back} dní zpětně - vyžadují history API (placený tarif)")
+        print(f"  Pro data starší než 7 dní bude použit fallback (syntetická data)")
     
     while current_date <= end_date:
         date_str = current_date.strftime('%Y-%m-%d')

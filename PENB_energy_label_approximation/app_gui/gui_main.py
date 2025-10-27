@@ -342,6 +342,37 @@ def main():
         )
         
         st.session_state['avg_indoor_temp'] = avg_indoor_temp
+        
+        st.divider()
+        st.header("💧 Aproximace ohřevu vody (TUV)")
+        
+        st.markdown(
+            """
+            Nastavte, jak má být aproximována spotřeba energie na ohřev teplé vody.
+            """
+        )
+        
+        use_tuv_model = st.checkbox(
+            "Použít modelovou aproximaci TUV",
+            value=True,
+            help="Model automaticky odhadne spotřebu na TUV z celkové spotřeby"
+        )
+        
+        st.session_state['use_tuv_model'] = use_tuv_model
+        
+        if not use_tuv_model:
+            tuv_percentage = st.slider(
+                "Podíl spotřeby na TUV (%)",
+                min_value=0,
+                max_value=100,
+                value=20,
+                step=5,
+                help="Kolik procent celkové spotřeby připadá na ohřev vody"
+            )
+            st.session_state['tuv_percentage'] = tuv_percentage
+        else:
+            st.session_state['tuv_percentage'] = None
+            st.info("Model automaticky určí spotřebu na TUV na základě dat")
     
     # === TAB 4: Výpočet ===
     with tab4:
@@ -420,9 +451,16 @@ def run_computation(
     temp_day, temp_night, daily_energy_data, avg_indoor_temp,
     mode, api_key
 ):
-    """Hlavní výpočetní funkce"""
+    """Hlavní výpočetní funkce s progress indikátory"""
+    
+    # Progress container
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
     # 1. Vytvoř user inputs
+    status_text.text("⚙️ Připravuji vstupní data...")
+    progress_bar.progress(5)
+    
     geometry = ApartmentGeometry(area_m2=area, height_m=height)
     heating_system = HeatingSystemInfo(
         system_type=system_type,
@@ -441,16 +479,24 @@ def run_computation(
     )
     
     # 2. Stáhni počasí
-    st.write("📡 Stahuji počasí...")
+    status_text.text("📡 Stahuji historická data o počasí...")
+    progress_bar.progress(10)
+    
     dates = [d.date for d in daily_energy_data]
     min_date = min(dates)
     max_date = max(dates)
     
     weather_df = fetch_hourly_weather(location, min_date, max_date, api_key)
+    
+    status_text.text("🔧 Čistím a kontroluji data o počasí...")
+    progress_bar.progress(25)
+    
     weather_df = clean_weather_data(weather_df)
     
     # 3. Preprocessing
-    st.write("🔧 Preprocessing dat...")
+    status_text.text("🔧 Zpracovávám a zarovnávám data...")
+    progress_bar.progress(35)
+    
     daily_df = pd.DataFrame([d.model_dump() for d in daily_energy_data])
     daily_df, weather_df = align_daily_energy_to_hourly(daily_df, weather_df)
     
@@ -460,12 +506,28 @@ def run_computation(
     warnings = validate_data_quality(daily_df, hourly_df)
     
     # 4. Baseline TUV
-    st.write("💧 Odhaduji baseline TUV...")
-    daily_df = split_heating_and_tuv(daily_df)
-    baseline_tuv = daily_df['baseline_tuv_kwh'].iloc[0]
+    status_text.text("💧 Rozděluji spotřebu (vytápění vs. TUV)...")
+    progress_bar.progress(45)
+    
+    # Zkontroluj, zda je nastaven manuální podíl TUV
+    tuv_percentage = st.session_state.get('tuv_percentage', None)
+    use_tuv_model = st.session_state.get('use_tuv_model', True)
+    
+    if not use_tuv_model and tuv_percentage is not None:
+        # Manuální nastavení podílu TUV
+        daily_df['baseline_tuv_kwh'] = daily_df['energy_total_kwh'] * (tuv_percentage / 100)
+        daily_df['heating_kwh'] = daily_df['energy_total_kwh'] * (1 - tuv_percentage / 100)
+        baseline_tuv = daily_df['baseline_tuv_kwh'].mean()
+        st.info(f"💧 Použit manuální podíl TUV: {tuv_percentage}% ({baseline_tuv:.2f} kWh/den)")
+    else:
+        # Automatická aproximace modelem
+        daily_df = split_heating_and_tuv(daily_df)
+        baseline_tuv = daily_df['baseline_tuv_kwh'].iloc[0]
     
     # 5. Kalibrace
-    st.write("🎯 Kalibruji model...")
+    status_text.text("🎯 Kalibruji termický model...")
+    progress_bar.progress(55)
+    
     calibrated = calibrate_model_simple(
         daily_df,
         hourly_df,
@@ -477,11 +539,15 @@ def run_computation(
     )
     
     # 6. Typický rok
-    st.write("☀️ Vytvářím typický rok...")
+    status_text.text("☀️ Vytvářím typický meteorologický rok...")
+    progress_bar.progress(70)
+    
     typical_year = create_typical_year_weather(location, api_key)
     
     # 7. Simulace roku
-    st.write("📅 Simuluji roční potřebu...")
+    status_text.text("📅 Simuluji roční potřebu tepla...")
+    progress_bar.progress(80)
+    
     annual_sim = simulate_annual_heating_demand(
         calibrated,
         typical_year,
@@ -494,6 +560,9 @@ def run_computation(
     heating_per_m2 = heating_demand_kwh / area
     
     # 8. Primární energie
+    status_text.text("⚡ Počítám primární energii...")
+    progress_bar.progress(85)
+    
     eff_final = efficiency if efficiency else heating_system.get_default_efficiency()[0]
     primary = calculate_primary_energy(
         heating_demand_kwh,
@@ -503,6 +572,9 @@ def run_computation(
     primary_per_m2 = primary / area
     
     # 9. Klasifikace
+    status_text.text("🏷️ Klasifikuji energetický štítek...")
+    progress_bar.progress(90)
+    
     energy_class = classify_energy_label(heating_per_m2, primary_per_m2)
     
     # 10. Kvalita
@@ -512,6 +584,9 @@ def run_computation(
     lower, upper = estimate_uncertainty_bounds(calibrated, heating_per_m2, warnings)
     
     # 12. Disclaimery a návrhy
+    status_text.text("📋 Generuji doporučení...")
+    progress_bar.progress(95)
+    
     disclaimers = generate_disclaimers(quality, mode, len(daily_df), warnings)
     suggestions = suggest_improvements(quality, mode, len(daily_df), calibrated)
     
@@ -524,6 +599,10 @@ def run_computation(
         heating_demand_upper_bound=upper,
         disclaimers=disclaimers
     )
+    
+    # Dokončeno
+    status_text.text("✅ Výpočet úspěšně dokončen!")
+    progress_bar.progress(100)
     
     return {
         'annual_results': annual_results,
