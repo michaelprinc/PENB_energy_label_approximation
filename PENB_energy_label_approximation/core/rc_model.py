@@ -125,7 +125,11 @@ class RC1Model:
         
         for idx, row in df.iterrows():
             T_out = row['temp_out_c']
-            Q_heat = row.get(Q_heat_column, 0) * 1000  # kW → W
+            heat_value = row.get(Q_heat_column, 0)
+            if isinstance(Q_heat_column, str) and Q_heat_column.lower().endswith('_kw'):
+                Q_heat = heat_value * 1000  # kW → W
+            else:
+                Q_heat = heat_value
             GHI = row.get('ghi_wm2', 0)
             
             T_in = self.simulate_step(T_in, T_out, Q_heat, GHI, dt_seconds=3600)

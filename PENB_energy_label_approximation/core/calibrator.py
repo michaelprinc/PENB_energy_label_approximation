@@ -1,10 +1,14 @@
 """
 Kalibrace parametrů RC modelu podle naměřených dat
 """
+import os
+from concurrent.futures import ThreadPoolExecutor
+from typing import Tuple, Optional
+
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Optional
 from scipy.optimize import minimize, differential_evolution
+
 from core.rc_model import RC1Model, estimate_initial_parameters
 from core.data_models import CalibratedParameters
 
@@ -66,11 +70,21 @@ def calibrate_model_simple(
         daily_energy_df,
         hourly_weather_df,
         indoor_temp_c=avg_indoor_temp
-    )
+    ).copy()
     
     # Připrav T_in (pokud nemáme skutečné, použijeme konstantu)
     if 'temp_in_c' not in hourly_with_energy.columns:
         hourly_with_energy['temp_in_c'] = avg_indoor_temp
+
+    # Převeď hodinovou energii na střední výkon ve wattech (pro simulaci)
+    hourly_with_energy['heating_power_W'] = (
+        hourly_with_energy['heating_energy_kwh'] * 1000  # kWh → W (průměrný výkon za hodinu)
+    )
+
+    if hourly_with_energy.empty:
+        raise ValueError("Hourly dataframe for calibration is empty; cannot calibrate model.")
+
+    initial_indoor_temp = float(hourly_with_energy['temp_in_c'].iloc[0])
     
     # Funkce cost
     def cost_function(params):
@@ -95,14 +109,8 @@ def calibrate_model_simple(
         )
         
         # Simuluj hodinový průběh
-        hourly_with_energy['heating_power_W'] = (
-            hourly_with_energy['heating_energy_kwh'] * 1000  # kWh → W (průměrný výkon za hodinu)
-        )
-        
-        T_in_init = hourly_with_energy['temp_in_c'].iloc[0]
-        
         simulated = model.simulate_hourly(
-            T_in_init,
+            initial_indoor_temp,
             hourly_with_energy,
             Q_heat_column='heating_power_W'
         )
@@ -164,15 +172,36 @@ def calibrate_model_simple(
     if mode == "advanced":
         # ADVANCED: použij differential evolution (globální optimalizace)
         print("  Režim ADVANCED: globální optimalizace...")
+        cpu_count = os.cpu_count() or 2
+        default_workers = max(1, cpu_count - 1)
+        env_override = os.getenv("PENB_ADVANCED_THREADS")
+        try:
+            max_workers = max(1, int(env_override)) if env_override else default_workers
+        except ValueError:
+            max_workers = default_workers
         
-        result = differential_evolution(
-            cost_function,
-            bounds,
+        de_kwargs = dict(
+            bounds=bounds,
             maxiter=100,
             popsize=10,
             seed=42,
             disp=False
         )
+        
+        if max_workers > 1:
+            print(f"    * paralelní vyhodnocení ({max_workers} vláken)")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                result = differential_evolution(
+                    cost_function,
+                    workers=executor.map,
+                    updating='deferred',
+                    **de_kwargs
+                )
+        else:
+            result = differential_evolution(
+                cost_function,
+                **de_kwargs
+            )
     else:
         # STANDARD: lokální optimalizace
         print("  Režim STANDARD: lokální optimalizace...")
@@ -201,11 +230,8 @@ def calibrate_model_simple(
         internal_gains_W_per_m2=q_int_opt
     )
     
-    hourly_with_energy['heating_power_W'] = hourly_with_energy['heating_energy_kwh'] * 1000
-    T_in_init = hourly_with_energy['temp_in_c'].iloc[0]
-    
     final_sim = final_model.simulate_hourly(
-        T_in_init,
+        initial_indoor_temp,
         hourly_with_energy,
         Q_heat_column='heating_power_W'
     )
