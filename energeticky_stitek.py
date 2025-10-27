@@ -6,7 +6,6 @@ Aplikace odhaduje měrnou potřebu tepla (kWh/m²·rok) a orientační energetic
 """
 
 import argparse
-import json
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -25,6 +24,21 @@ ENERGY_CLASSES = [
     ("F", 200, 250),
     ("G", 250, float('inf'))
 ]
+
+# Fyzikální konstanty
+AIR_DENSITY_KG_M3 = 1.2  # kg/m³
+AIR_SPECIFIC_HEAT_J_KG_K = 1005  # J/(kg·K)
+
+# Konstanty pro odhad spotřeby TUV
+TUV_PER_PERSON_KWH_DAY = 1.75  # kWh/den na osobu
+
+# Konstanty pro syntetická meteorologická data
+SYNTHETIC_BASE_TEMP_C = 8  # Průměrná roční teplota
+SYNTHETIC_ANNUAL_AMPLITUDE_C = 10  # Amplituda ročního cyklu
+SYNTHETIC_DAILY_AMPLITUDE_C = 3  # Amplituda denního cyklu
+
+# Konstanty pro optimalizaci
+OPTIMIZATION_PENALTY = 1e10  # Penalizace pro neplatné parametry
 
 
 class WeatherDataFetcher:
@@ -89,8 +103,7 @@ class ConsumptionSplitter:
             (tuv_kwh, heating_kwh)
         """
         # Odhad TUV: cca 1.5-2 kWh na osobu na den (40-50°C ohřev vody)
-        tuv_per_person = 1.75
-        tuv_kwh = people_count * tuv_per_person
+        tuv_kwh = people_count * TUV_PER_PERSON_KWH_DAY
         
         # Zbytek jde na vytápění
         heating_kwh = max(0, daily_consumption_kwh - tuv_kwh)
@@ -132,11 +145,9 @@ class RCThermalModel:
         transmission_loss_w = self.hlc * temp_diff
         
         # Infiltrační ztráty
-        air_density = 1.2  # kg/m³
-        air_specific_heat = 1005  # J/(kg·K)
         infiltration_loss_w = (
-            self.infiltration_rate * volume_m3 * air_density * 
-            air_specific_heat * temp_diff / 3600
+            self.infiltration_rate * volume_m3 * AIR_DENSITY_KG_M3 * 
+            AIR_SPECIFIC_HEAT_J_KG_K * temp_diff / 3600
         )
         
         total_loss_w = transmission_loss_w + infiltration_loss_w
@@ -200,7 +211,7 @@ class ModelCalibrator:
         def objective(params):
             hlc, infiltration, capacity = params
             if hlc <= 0 or infiltration <= 0 or capacity <= 0:
-                return 1e10
+                return OPTIMIZATION_PENALTY
             
             model = RCThermalModel(hlc, infiltration, capacity)
             predicted = model.calculate_heating_demand(
@@ -464,11 +475,11 @@ def main():
         for day in range(365):
             for hour in range(24):
                 # Roční teplotní cyklus (sinusoida)
-                annual_cycle = -10 * np.cos(2 * np.pi * day / 365)
+                annual_cycle = -SYNTHETIC_ANNUAL_AMPLITUDE_C * np.cos(2 * np.pi * day / 365)
                 # Denní cyklus (menší amplituda)
-                daily_cycle = -3 * np.cos(2 * np.pi * hour / 24)
+                daily_cycle = -SYNTHETIC_DAILY_AMPLITUDE_C * np.cos(2 * np.pi * hour / 24)
                 # Základní teplota + cykly
-                temp = 8 + annual_cycle + daily_cycle
+                temp = SYNTHETIC_BASE_TEMP_C + annual_cycle + daily_cycle
                 weather_data.append({'temp_c': temp})
     
     # Výpočet průměrné venkovní teploty
