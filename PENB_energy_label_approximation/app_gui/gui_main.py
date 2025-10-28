@@ -175,20 +175,49 @@ def main():
             st.subheader("Komfortní teploty")
             
             temp_day = st.slider(
-                "Denní teplota (6:00 - 22:00)",
+                "Denní teplota",
                 min_value=18.0,
                 max_value=24.0,
                 value=21.0,
-                step=0.5
+                step=0.5,
+                help="Požadovaná teplota během denního období"
             )
             
             temp_night = st.slider(
-                "Noční teplota (22:00 - 6:00)",
+                "Noční teplota",
                 min_value=16.0,
                 max_value=24.0,
                 value=19.0,
-                step=0.5
+                step=0.5,
+                help="Požadovaná teplota během nočního období"
             )
+            
+            st.markdown("**Časové rozsahy**")
+            
+            col_start, col_end = st.columns(2)
+            
+            with col_start:
+                day_start_hour = st.number_input(
+                    "Den začíná (h)",
+                    min_value=0,
+                    max_value=23,
+                    value=6,
+                    step=1,
+                    help="Hodina, kdy začíná denní režim (např. 6 = 6:00)"
+                )
+            
+            with col_end:
+                day_end_hour = st.number_input(
+                    "Den končí (h)",
+                    min_value=0,
+                    max_value=23,
+                    value=22,
+                    step=1,
+                    help="Hodina, kdy končí denní režim (např. 22 = 22:00)"
+                )
+            
+            if day_end_hour <= day_start_hour:
+                st.error("⚠ Konec denního období musí být po začátku!")
         
         st.divider()
         st.header("🔥 Systém vytápění")
@@ -344,6 +373,39 @@ def main():
         st.session_state['avg_indoor_temp'] = avg_indoor_temp
         
         st.divider()
+        st.header("🌡️ Měsíce bez topení (2025)")
+        
+        st.markdown(
+            """
+            Označte měsíce v **roce 2025**, kdy nebylo nutné topit z důvodu dostatečně vysoké venkovní teploty.
+            Data z těchto měsíců se použijí pro přesnější odhad spotřeby na ohřev vody (TUV).
+            """
+        )
+        
+        month_names = {
+            1: "Leden", 2: "Únor", 3: "Březen", 4: "Duben",
+            5: "Květen", 6: "Červen", 7: "Červenec", 8: "Srpen",
+            9: "Září", 10: "Říjen", 11: "Listopad", 12: "Prosinec"
+        }
+        
+        # Defaultně vyber typické letní měsíce
+        non_heating_months = st.multiselect(
+            "Měsíce bez topení (2025)",
+            options=list(range(1, 13)),
+            default=[5, 6, 7, 8, 9],
+            format_func=lambda x: month_names[x],
+            help="Např. květen-září pro běžné klima ČR"
+        )
+        
+        st.session_state['non_heating_months'] = non_heating_months
+        
+        if non_heating_months:
+            months_str = ", ".join([month_names[m] for m in sorted(non_heating_months)])
+            st.info(f"✓ Označeno: {months_str}")
+        else:
+            st.warning("⚠ Nevybrány žádné měsíce - použije se automatický odhad (10. percentil)")
+        
+        st.divider()
         st.header("💧 Aproximace ohřevu vody (TUV)")
         
         st.markdown(
@@ -424,8 +486,11 @@ def main():
                         efficiency=efficiency,
                         temp_day=temp_day,
                         temp_night=temp_night,
+                        day_start_hour=day_start_hour,
+                        day_end_hour=day_end_hour,
                         daily_energy_data=st.session_state['daily_energy_data'],
                         avg_indoor_temp=st.session_state['avg_indoor_temp'],
+                        non_heating_months=st.session_state.get('non_heating_months', None),
                         mode=mode,
                         api_key=api_key
                     )
@@ -448,7 +513,8 @@ def main():
 
 def run_computation(
     location, area, height, system_type, efficiency,
-    temp_day, temp_night, daily_energy_data, avg_indoor_temp,
+    temp_day, temp_night, day_start_hour, day_end_hour,
+    daily_energy_data, avg_indoor_temp, non_heating_months,
     mode, api_key
 ):
     """Hlavní výpočetní funkce s progress indikátory"""
@@ -466,7 +532,12 @@ def run_computation(
         system_type=system_type,
         efficiency_or_cop=efficiency
     )
-    comfort_temp = TemperatureProfile(day_temp_c=temp_day, night_temp_c=temp_night)
+    comfort_temp = TemperatureProfile(
+        day_temp_c=temp_day,
+        night_temp_c=temp_night,
+        day_start_hour=day_start_hour,
+        day_end_hour=day_end_hour
+    )
     
     user_inputs = UserInputs(
         geometry=geometry,
@@ -475,7 +546,8 @@ def run_computation(
         computation_mode=mode,
         comfort_temperature=comfort_temp,
         daily_energy=daily_energy_data,
-        avg_indoor_temp_c=avg_indoor_temp
+        avg_indoor_temp_c=avg_indoor_temp,
+        non_heating_months=non_heating_months
     )
     
     # 2. Stáhni počasí
@@ -500,7 +572,14 @@ def run_computation(
     daily_df = pd.DataFrame([d.model_dump() for d in daily_energy_data])
     daily_df, weather_df = align_daily_energy_to_hourly(daily_df, weather_df)
     
-    indoor_temp_df = create_hourly_indoor_temp(avg_indoor_temp, weather_df)
+    indoor_temp_df = create_hourly_indoor_temp(
+        avg_indoor_temp,
+        weather_df,
+        day_temp=temp_day,
+        night_temp=temp_night,
+        day_start_hour=day_start_hour,
+        day_end_hour=day_end_hour
+    )
     hourly_df = merge_hourly_data(weather_df, indoor_temp_df)
     
     warnings = validate_data_quality(daily_df, hourly_df)
@@ -520,9 +599,33 @@ def run_computation(
         baseline_tuv = daily_df['baseline_tuv_kwh'].mean()
         st.info(f"💧 Použit manuální podíl TUV: {tuv_percentage}% ({baseline_tuv:.2f} kWh/den)")
     else:
-        # Automatická aproximace modelem
-        daily_df = split_heating_and_tuv(daily_df)
-        baseline_tuv = daily_df['baseline_tuv_kwh'].iloc[0]
+        # Automatická aproximace modelem - využij měsíce bez topení pokud jsou
+        if non_heating_months and len(non_heating_months) > 0:
+            # Použij data z označených měsíců pro baseline TUV
+            daily_df['month'] = pd.to_datetime(daily_df['date']).dt.month
+            daily_df['year'] = pd.to_datetime(daily_df['date']).dt.year
+            
+            # Filtruj pouze rok 2025 a označené měsíce
+            non_heating_mask = (
+                (daily_df['year'] == 2025) & 
+                (daily_df['month'].isin(non_heating_months))
+            )
+            
+            if non_heating_mask.sum() > 0:
+                baseline_tuv_manual = daily_df.loc[non_heating_mask, 'energy_total_kwh'].mean()
+                daily_df = split_heating_and_tuv(daily_df, baseline_tuv_kwh=baseline_tuv_manual)
+                baseline_tuv = baseline_tuv_manual
+                months_used = daily_df.loc[non_heating_mask, 'month'].unique()
+                st.info(f"💧 Baseline TUV z měsíců bez topení: {baseline_tuv:.2f} kWh/den (použito {non_heating_mask.sum()} dní)")
+            else:
+                # Nebyly nalezeny žádné dny v označených měsících
+                daily_df = split_heating_and_tuv(daily_df)
+                baseline_tuv = daily_df['baseline_tuv_kwh'].iloc[0]
+                st.warning("⚠ V datech nebyla data z označených měsíců - použit automatický odhad")
+        else:
+            # Standardní aproximace (10. percentil)
+            daily_df = split_heating_and_tuv(daily_df)
+            baseline_tuv = daily_df['baseline_tuv_kwh'].iloc[0]
     
     # 5. Kalibrace
     status_text.text("🎯 Kalibruji termický model...")

@@ -154,30 +154,48 @@ def align_daily_energy_to_hourly(
 def create_hourly_indoor_temp(
     daily_avg_temp: float,
     hourly_weather_df: pd.DataFrame,
+    day_temp: Optional[float] = None,
+    night_temp: Optional[float] = None,
+    day_start_hour: int = 6,
+    day_end_hour: int = 22,
     day_night_delta: float = 0.5
 ) -> pd.DataFrame:
     """
     Vytvoří pseudo-hodinovou vnitřní teplotu z denního průměru.
     
     Args:
-        daily_avg_temp: průměrná vnitřní teplota °C
+        daily_avg_temp: průměrná vnitřní teplota °C (použije se pokud nejsou day_temp/night_temp)
         hourly_weather_df: DataFrame s časovými razítky
-        day_night_delta: rozdíl den/noc °C
+        day_temp: denní teplota °C (volitelné)
+        night_temp: noční teplota °C (volitelné)
+        day_start_hour: hodina začátku denního režimu (0-23)
+        day_end_hour: hodina konce denního režimu (0-23)
+        day_night_delta: rozdíl den/noc °C (použije se pouze pokud nejsou day_temp/night_temp)
     
     Returns:
         DataFrame s timestamp, temp_in_c
     """
     df = hourly_weather_df[['timestamp']].copy()
-    
-    # Denní variace (jednoduchá sinusoida)
     hours = df['timestamp'].dt.hour
     
-    # Maximum ve 14:00, minimum ve 2:00
-    temp_variation = day_night_delta * np.sin(2 * np.pi * (hours - 2) / 24)
-    
-    df['temp_in_c'] = daily_avg_temp + temp_variation
-    
-    print(f"✓ Vytvořena pseudo-hodinová T_in (průměr {daily_avg_temp}°C, ±{day_night_delta}°C)")
+    if day_temp is not None and night_temp is not None:
+        # Použij explicitní denní a noční teploty
+        df['temp_in_c'] = night_temp  # Default = noční teplota
+        
+        # Denní režim: od day_start_hour do day_end_hour
+        day_mask = (hours >= day_start_hour) & (hours < day_end_hour)
+        df.loc[day_mask, 'temp_in_c'] = day_temp
+        
+        print(f"✓ Vytvořena hodinová T_in:")
+        print(f"  - Den ({day_start_hour}:00-{day_end_hour}:00): {day_temp}°C")
+        print(f"  - Noc: {night_temp}°C")
+    else:
+        # Staré chování: sinusoida s daily_avg_temp ± day_night_delta
+        # Maximum ve 14:00, minimum ve 2:00
+        temp_variation = day_night_delta * np.sin(2 * np.pi * (hours - 2) / 24)
+        df['temp_in_c'] = daily_avg_temp + temp_variation
+        
+        print(f"✓ Vytvořena pseudo-hodinová T_in (průměr {daily_avg_temp}°C, ±{day_night_delta}°C)")
     
     return df
 

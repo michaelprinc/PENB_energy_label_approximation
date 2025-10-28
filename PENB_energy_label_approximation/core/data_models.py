@@ -86,12 +86,22 @@ class TemperatureProfile(BaseModel):
     """Teplotní profil (den/noc)"""
     day_temp_c: float = Field(default=21.0, ge=15.0, le=26.0)
     night_temp_c: float = Field(default=19.0, ge=15.0, le=26.0)
+    day_start_hour: int = Field(default=6, ge=0, le=23, description="Začátek denního období (hodina)")
+    day_end_hour: int = Field(default=22, ge=0, le=23, description="Konec denního období (hodina)")
     
     @field_validator('night_temp_c')
     @classmethod
     def night_not_higher_than_day(cls, v, info):
         if 'day_temp_c' in info.data and v > info.data['day_temp_c']:
             raise ValueError('Noční teplota nemůže být vyšší než denní')
+        return v
+    
+    @field_validator('day_end_hour')
+    @classmethod
+    def validate_day_hours(cls, v, info):
+        if 'day_start_hour' in info.data:
+            if v <= info.data['day_start_hour']:
+                raise ValueError('Konec denního období musí být po začátku')
         return v
 
 
@@ -117,6 +127,12 @@ class UserInputs(BaseModel):
     
     # Průměrná vnitřní teplota (pokud nemáme hodinová data)
     avg_indoor_temp_c: Optional[float] = Field(None, ge=15.0, le=30.0)
+    
+    # Měsíce bez topení (1-12, např. [5,6,7,8,9] pro květen-září)
+    non_heating_months: Optional[List[int]] = Field(
+        None,
+        description="Měsíce v aktuálním roce, kdy nebylo nutné topit"
+    )
     
     @field_validator('daily_energy')
     @classmethod
