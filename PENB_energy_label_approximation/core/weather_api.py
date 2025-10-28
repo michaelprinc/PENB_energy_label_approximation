@@ -62,21 +62,23 @@ def fetch_hourly_weather(
     location: str,
     start_date: date,
     end_date: date,
-    api_key: str
+    api_key: str,
+    use_openmeteo_fallback: bool = True
 ) -> pd.DataFrame:
     """
-    Stáhne hodinová data o počasí z weatherapi.com.
+    Stáhne hodinová data o počasí s inteligentním fallbackem.
     
-    Strategie:
-    1. Pro data do 7 dní zpětně: zkusí forecast.json (free tier)
-    2. Pro starší data: zkusí history.json (vyžaduje placený tarif)
-    3. Pokud selže: vygeneruje syntetická data s varováním
+    HYBRIDNÍ STRATEGIE (PRODUKČNÍ):
+    1. WeatherAPI (0-8 dní zpět): Plná přesnost
+    2. Open-Meteo (9+ dní zpět): Historická reanalysis data (ZDARMA!)
+    3. Syntetická data: Pouze jako poslední možnost
     
     Args:
         location: město nebo "lat,lon"
         start_date: začátek období
         end_date: konec období
         api_key: API klíč pro weatherapi.com
+        use_openmeteo_fallback: Použít Open-Meteo pro stará data (default: True)
     
     Returns:
         DataFrame s sloupci: timestamp, temp_out_c, humidity_pct, wind_mps, ghi_wm2
@@ -84,63 +86,41 @@ def fetch_hourly_weather(
     if not api_key:
         raise ValueError("API klíč pro weatherapi.com není nastaven!")
     
-    print(f"\n📡 Stahuji počasí pro období {start_date} až {end_date}")
+    print(f"\n📡 HYBRIDNÍ SBĚR DAT: WeatherAPI + Open-Meteo")
+    print(f"   Období: {start_date} až {end_date}")
     
     all_data = []
     current_date = start_date
     today = date.today()
-    
-    # Kontrola, zda jsou data v dosahu free tier (7 dní zpětně)
-    # POZNÁMKA: WeatherAPI.com free tier podporuje POUZE posledních 7 dní
-    # Pro starší data je potřeba placený tarif nebo se použijí syntetická data
     days_back = (today - start_date).days
-    use_free_tier = days_back <= 7
     
-    if use_free_tier:
-        print(f"✓ Data jsou do 7 dní zpětně - použiji free tier forecast API")
-    else:
-        print(f"⚠ Data jsou {days_back} dní zpětně - vyžadují history API (placený tarif)")
-        print(f"  Pro data starší než 7 dní bude použit fallback (syntetická data)")
+    print(f"   Data jsou {days_back} dní zpětně")
     
-    while current_date <= end_date:
-        date_str = current_date.strftime('%Y-%m-%d')
-        success = False
+    # Rozdělení na čerstvá (0-8 dní) vs. stará (9+ dní) data
+    recent_dates = []
+    old_dates = []
+    
+    temp_date = start_date
+    while temp_date <= end_date:
+        age = (today - temp_date).days
+        if age <= 8:
+            recent_dates.append(temp_date)
+        else:
+            old_dates.append(temp_date)
+        temp_date += timedelta(days=1)
+    
+    print(f"   → Čerstvá data (WeatherAPI): {len(recent_dates)} dní")
+    print(f"   → Stará data (Open-Meteo): {len(old_dates)} dní\n")
+    
+    # ČÁST 1: WeatherAPI pro čerstvá data (0-8 dní)
+    if recent_dates:
+        print(f"{'─'*70}")
+        print(f"ČÁST 1: WeatherAPI ({recent_dates[0]} až {recent_dates[-1]})")
+        print(f"{'─'*70}")
         
-        # Strategie 1: Zkus forecast API pro nedávná data (free tier)
-        if (today - current_date).days <= 7:
-            try:
-                url = "http://api.weatherapi.com/v1/forecast.json"
-                params = {
-                    'key': api_key,
-                    'q': location,
-                    'dt': date_str,
-                    'aqi': 'no'
-                }
-                
-                response = requests.get(url, params=params, timeout=15)
-                response.raise_for_status()
-                data = response.json()
-                
-                # Zpracuj hodinová data
-                for hour in data['forecast']['forecastday'][0]['hour']:
-                    timestamp = datetime.fromisoformat(hour['time'].replace(' ', 'T'))
-                    
-                    all_data.append({
-                        'timestamp': timestamp,
-                        'temp_out_c': hour['temp_c'],
-                        'humidity_pct': hour['humidity'],
-                        'wind_mps': hour['wind_kph'] / 3.6,
-                        'ghi_wm2': hour.get('uv', 0) * 25
-                    })
-                
-                success = True
-                print(f"  ✓ {date_str} (forecast API)")
-                
-            except Exception as e:
-                print(f"  ⚠ Forecast API selhalo pro {date_str}: {e}")
-        
-        # Strategie 2: Zkus history API (placený tarif)
-        if not success:
+        for current_date in recent_dates:
+            date_str = current_date.strftime('%Y-%m-%d')
+            
             try:
                 url = "http://api.weatherapi.com/v1/history.json"
                 params = {
@@ -162,56 +142,120 @@ def fetch_hourly_weather(
                         'temp_out_c': hour['temp_c'],
                         'humidity_pct': hour['humidity'],
                         'wind_mps': hour['wind_kph'] / 3.6,
-                        'ghi_wm2': hour.get('uv', 0) * 25
+                        'ghi_wm2': hour.get('uv', 0) * 25,
+                        'source': 'WeatherAPI'
                     })
                 
-                success = True
-                print(f"  ✓ {date_str} (history API)")
+                print(f"  ✅ {date_str} - WeatherAPI OK")
                 
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 400:
-                    # Pravděpodobně free tier - vygeneruj syntetická data
-                    print(f"  ⚠ {date_str}: History API nedostupné (free tier)")
-                elif e.response.status_code == 403:
-                    print(f"  ⚠ {date_str}: Přístup odepřen - vyžaduje placený tarif")
-                else:
-                    print(f"  ⚠ {date_str}: HTTP {e.response.status_code}")
             except Exception as e:
-                print(f"  ⚠ {date_str}: {e}")
-        
-        # Strategie 3: Vygeneruj syntetická data jako fallback
-        if not success:
-            print(f"  ⚙ {date_str}: Generuji syntetická data")
-            synthetic_data = _generate_synthetic_day_weather(
-                current_date, location, api_key
-            )
-            all_data.extend(synthetic_data)
-        
-        current_date += timedelta(days=1)
+                print(f"  ⚠️  {date_str} - WeatherAPI selhalo: {e}")
     
+    # ČÁST 2: Open-Meteo pro stará data (9+ dní) NEBO syntetická data
+    if old_dates:
+        if use_openmeteo_fallback:
+            print(f"\n{'─'*70}")
+            print(f"ČÁST 2: Open-Meteo ({old_dates[0]} až {old_dates[-1]})")
+            print(f"{'─'*70}")
+            
+            try:
+                # Import Open-Meteo modulu
+                from core.openmeteo_api import fetch_openmeteo_historical, get_coordinates_for_location
+                
+                # Získej souřadnice
+                lat, lon = parse_location(location)
+                if lat is None:
+                    lat, lon = get_coordinates_for_location(location)
+                
+                # Stáhni data z Open-Meteo
+                df_openmeteo = fetch_openmeteo_historical(
+                    lat, lon,
+                    old_dates[0],
+                    old_dates[-1]
+                )
+                
+                # Přidej source flag
+                df_openmeteo['source'] = 'Open-Meteo'
+                
+                # Konverze na list of dicts pro konzistenci
+                for _, row in df_openmeteo.iterrows():
+                    all_data.append({
+                        'timestamp': row['timestamp'],
+                        'temp_out_c': row['temp_out_c'],
+                        'humidity_pct': row['humidity_pct'],
+                        'wind_mps': row['wind_mps'],
+                        'ghi_wm2': row['ghi_wm2'],
+                        'source': 'Open-Meteo'
+                    })
+                
+                print(f"  ✅ Open-Meteo: {len(df_openmeteo)} hodin")
+                
+            except Exception as e:
+                print(f"  ⚠️  Open-Meteo selhalo: {e}")
+                print(f"  ℹ️  Fallback na syntetická data")
+                
+                # Fallback na syntetická data
+                for current_date in old_dates:
+                    synthetic_data = _generate_synthetic_day_weather(
+                        current_date, location, api_key
+                    )
+                    for hour_data in synthetic_data:
+                        hour_data['source'] = 'Synthetic'
+                    all_data.extend(synthetic_data)
+        else:
+            # Open-Meteo vypnuto - použij syntetická data
+            print(f"\n{'─'*70}")
+            print(f"ČÁST 2: Syntetická data (Open-Meteo vypnuto)")
+            print(f"         ({old_dates[0]} až {old_dates[-1]})")
+            print(f"{'─'*70}")
+            
+            for current_date in old_dates:
+                synthetic_data = _generate_synthetic_day_weather(
+                    current_date, location, api_key
+                )
+                for hour_data in synthetic_data:
+                    hour_data['source'] = 'Synthetic'
+                all_data.extend(synthetic_data)
+            
+            print(f"  ✅ Syntetická data: {len(old_dates) * 24} hodin")
+    
+    # Vyhodnocení výsledků
+    print(f"\n{'='*70}")
     if not all_data:
         raise ValueError(
-            "Nepodařilo se získat žádná data o počasí!\n"
+            "Nepodařilo se získat žádná data!\n"
             "Zkontrolujte:\n"
             "1. API klíč je správný\n"
             "2. Máte aktivní připojení k internetu\n"
-            "3. Pro historická data (>7 dní) potřebujete placený tarif"
+            "3. Lokace je platná"
         )
     
     df = pd.DataFrame(all_data)
     df = df.sort_values('timestamp').reset_index(drop=True)
+    
+    # Statistiky podle zdrojů
+    if 'source' in df.columns:
+        sources = df['source'].value_counts()
+        print(f"📊 VÝSLEDKY PODLE ZDROJŮ:")
+        for source, count in sources.items():
+            hours = count
+            days = hours / 24
+            print(f"  • {source}: {hours} hodin ({days:.1f} dní)")
     
     # Kontrola pokrytí
     expected_hours = (end_date - start_date).days * 24 + 24
     actual_hours = len(df)
     coverage = actual_hours / expected_hours * 100
     
-    print(f"\n✓ Staženo {actual_hours}/{expected_hours} hodin ({coverage:.1f}% pokrytí)")
+    print(f"\n📊 CELKOVÉ POKRYTÍ:")
+    print(f"  ✅ Staženo: {actual_hours}/{expected_hours} hodin ({coverage:.1f}%)")
     
     if coverage < 80:
-        print(f"⚠ VAROVÁNÍ: Pouze {coverage:.1f}% dat - výsledky mohou být nepřesné")
+        print(f"  ⚠️  VAROVÁNÍ: Pouze {coverage:.1f}% dat!")
     
-    return df
+    print(f"{'='*70}\n")
+    
+    return df.drop('source', axis=1) if 'source' in df.columns else df
 
 
 def _generate_synthetic_day_weather(

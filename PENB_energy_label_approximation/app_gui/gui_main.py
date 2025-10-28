@@ -172,52 +172,104 @@ def main():
             st.metric("Objem bytu", f"{volume:.1f} m³")
         
         with col2:
-            st.subheader("Komfortní teploty")
+            st.subheader("🌡️ Vnitřní teplota")
             
-            temp_day = st.slider(
-                "Denní teplota",
-                min_value=18.0,
-                max_value=24.0,
-                value=21.0,
-                step=0.5,
-                help="Požadovaná teplota během denního období"
+            # Přepínač mezi režimy
+            temp_mode = st.radio(
+                "Režim nastavení teploty",
+                options=["Den/Noc režim", "Průměrná teplota"],
+                horizontal=True,
+                help="Den/Noc: Různé teploty pro denní a noční období. Průměrná: Konstantní průměrná teplota."
             )
             
-            temp_night = st.slider(
-                "Noční teplota",
-                min_value=16.0,
-                max_value=24.0,
-                value=19.0,
-                step=0.5,
-                help="Požadovaná teplota během nočního období"
-            )
-            
-            st.markdown("**Časové rozsahy**")
-            
-            col_start, col_end = st.columns(2)
-            
-            with col_start:
-                day_start_hour = st.number_input(
-                    "Den začíná (h)",
-                    min_value=0,
-                    max_value=23,
-                    value=6,
-                    step=1,
-                    help="Hodina, kdy začíná denní režim (např. 6 = 6:00)"
+            if temp_mode == "Den/Noc režim":
+                # Den/Noc režim - zobrazit slidery pro denní/noční teplotu
+                temp_day = st.slider(
+                    "Denní teplota (°C)",
+                    min_value=18.0,
+                    max_value=24.0,
+                    value=21.0,
+                    step=0.5,
+                    help="Požadovaná teplota během denního období"
                 )
-            
-            with col_end:
-                day_end_hour = st.number_input(
-                    "Den končí (h)",
-                    min_value=0,
-                    max_value=23,
-                    value=22,
-                    step=1,
-                    help="Hodina, kdy končí denní režim (např. 22 = 22:00)"
+                
+                temp_night = st.slider(
+                    "Noční teplota (°C)",
+                    min_value=16.0,
+                    max_value=24.0,
+                    value=19.0,
+                    step=0.5,
+                    help="Požadovaná teplota během nočního období"
                 )
-            
-            if day_end_hour <= day_start_hour:
-                st.error("⚠ Konec denního období musí být po začátku!")
+                
+                if temp_night > temp_day:
+                    st.warning("⚠ Noční teplota by měla být nižší nebo rovna denní teplotě")
+                
+                st.markdown("**Časové rozsahy**")
+                
+                col_start, col_end = st.columns(2)
+                
+                with col_start:
+                    day_start_hour = st.number_input(
+                        "Den začíná (h)",
+                        min_value=0,
+                        max_value=23,
+                        value=6,
+                        step=1,
+                        help="Hodina, kdy začíná denní režim (např. 6 = 6:00)"
+                    )
+                
+                with col_end:
+                    day_end_hour = st.number_input(
+                        "Den končí (h)",
+                        min_value=0,
+                        max_value=23,
+                        value=22,
+                        step=1,
+                        help="Hodina, kdy končí denní režim (např. 22 = 22:00)"
+                    )
+                
+                if day_end_hour <= day_start_hour:
+                    st.error("⚠ Konec denního období musí být po začátku!")
+                
+                # Uložit do session state
+                st.session_state['temp_mode'] = 'day_night'
+                st.session_state['temp_day'] = temp_day
+                st.session_state['temp_night'] = temp_night
+                st.session_state['day_start_hour'] = day_start_hour
+                st.session_state['day_end_hour'] = day_end_hour
+                
+                # Vypočítej a zobraz průměr
+                day_hours = day_end_hour - day_start_hour
+                night_hours = 24 - day_hours
+                avg_temp_calculated = (temp_day * day_hours + temp_night * night_hours) / 24
+                st.info(f"ℹ️ Vypočítaná průměrná teplota: {avg_temp_calculated:.1f}°C")
+                
+            else:
+                # Průměrná teplota režim
+                temp_avg = st.slider(
+                    "Průměrná vnitřní teplota (°C)",
+                    min_value=16.0,
+                    max_value=26.0,
+                    value=21.0,
+                    step=0.5,
+                    help="Průměrná teplota ve vašem bytě (použije se konstantní profil)"
+                )
+                
+                st.info(
+                    "💡 V tomto režimu se použije konstantní teplota po celý den. "
+                    "Pro přesnější výsledky doporučujeme Den/Noc režim."
+                )
+                
+                # Uložit do session state
+                st.session_state['temp_mode'] = 'average'
+                st.session_state['temp_avg'] = temp_avg
+                
+                # Nastavit dummy hodnoty pro den/noc (budou ignorovány)
+                temp_day = temp_avg
+                temp_night = temp_avg
+                day_start_hour = 0
+                day_end_hour = 24
         
         st.divider()
         st.header("🔥 Systém vytápění")
@@ -350,29 +402,6 @@ def main():
         st.session_state['daily_energy_data'] = daily_energy_data
         
         st.divider()
-        st.header("🌡️ Vnitřní teplota")
-        
-        has_hourly_temp = st.checkbox(
-            "Mám hodinová měření vnitřní teploty",
-            value=False
-        )
-        
-        if has_hourly_temp:
-            st.warning("⚠ Hodinová data zatím nejsou plně podporována v MVP. Použijte průměr.")
-            has_hourly_temp = False
-        
-        avg_indoor_temp = st.slider(
-            "Průměrná vnitřní teplota (°C)",
-            min_value=16.0,
-            max_value=26.0,
-            value=21.0,
-            step=0.5,
-            help="Odhadněte průměrnou teplotu ve vašem bytě během sledovaného období"
-        )
-        
-        st.session_state['avg_indoor_temp'] = avg_indoor_temp
-        
-        st.divider()
         st.header("🌡️ Měsíce bez topení (2025)")
         
         st.markdown(
@@ -478,6 +507,22 @@ def main():
         if st.button("🚀 SPUSTIT VÝPOČET", disabled=not can_compute, type="primary"):
             with st.spinner("Probíhá výpočet..."):
                 try:
+                    # Získej avg_indoor_temp podle režimu
+                    temp_mode = st.session_state.get('temp_mode', 'day_night')
+                    
+                    if temp_mode == 'average':
+                        # Průměrná teplota režim
+                        avg_indoor_temp = st.session_state.get('temp_avg', 21.0)
+                    else:
+                        # Den/Noc režim - vypočítej průměr
+                        t_day = st.session_state.get('temp_day', 21.0)
+                        t_night = st.session_state.get('temp_night', 19.0)
+                        d_start = st.session_state.get('day_start_hour', 6)
+                        d_end = st.session_state.get('day_end_hour', 22)
+                        day_hours = d_end - d_start
+                        night_hours = 24 - day_hours
+                        avg_indoor_temp = (t_day * day_hours + t_night * night_hours) / 24
+                    
                     results = run_computation(
                         location=st.session_state['location'],
                         area=area,
@@ -489,7 +534,7 @@ def main():
                         day_start_hour=day_start_hour,
                         day_end_hour=day_end_hour,
                         daily_energy_data=st.session_state['daily_energy_data'],
-                        avg_indoor_temp=st.session_state['avg_indoor_temp'],
+                        avg_indoor_temp=avg_indoor_temp,
                         non_heating_months=st.session_state.get('non_heating_months', None),
                         mode=mode,
                         api_key=api_key
